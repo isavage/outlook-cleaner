@@ -104,13 +104,25 @@ export const buildGraphFilter = ({ sender = '', subject = '', body = '', folder 
   const filterParts = [];
 
   if (sender.trim()) {
-    const safeSender = sender.trim().replace(/'/g, "''");
-    filterParts.push(`contains(from/emailAddress/address,'${safeSender}')`);
+    const senders = sender.split(',').map((s) => s.trim()).filter(Boolean);
+    if (senders.length === 1) {
+      const safeSender = senders[0].replace(/'/g, "''");
+      filterParts.push(`contains(from/emailAddress/address,'${safeSender}')`);
+    } else if (senders.length > 1) {
+      const orParts = senders.map((s) => {
+        const safe = s.replace(/'/g, "''");
+        return `contains(from/emailAddress/address,'${safe}')`;
+      });
+      filterParts.push(`(${orParts.join(' or ')})`);
+    }
   }
 
   if (senderExclude.trim()) {
-    const safeSender = senderExclude.trim().replace(/'/g, "''");
-    filterParts.push(`not(contains(from/emailAddress/address,'${safeSender}'))`);
+    const senders = senderExclude.split(',').map((s) => s.trim()).filter(Boolean);
+    senders.forEach((s) => {
+      const safe = s.replace(/'/g, "''");
+      filterParts.push(`not(contains(from/emailAddress/address,'${safe}'))`);
+    });
   }
 
   if (subject.trim()) {
