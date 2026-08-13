@@ -1,5 +1,6 @@
 services:
   api:
+    container_name: outlook-cleaner-api
     build:
       context: ./api
       dockerfile: Dockerfile
@@ -8,9 +9,10 @@ services:
     ports:
       - '${PORT:-4000}:${PORT:-4000}'
     networks:
-      - outlooknet
+      - outlook.net
 
   web:
+    container_name: outlook-cleaner-web
     build:
       context: ./web
       dockerfile: Dockerfile
@@ -24,8 +26,8 @@ services:
     depends_on:
       - api
     networks:
-      - outlooknet
+      - outlook.net
 
 networks:
-  outlooknet:
+  outlook.net:
     driver: bridge
