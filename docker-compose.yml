@@ -1,0 +1,31 @@
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    environment:
+      - PORT=${PORT:-4000}
+    ports:
+      - '${PORT:-4000}:${PORT:-4000}'
+    networks:
+      - outlooknet
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+        VITE_AZURE_CLIENT_ID: ${VITE_AZURE_CLIENT_ID}
+        VITE_AZURE_TENANT_ID: ${VITE_AZURE_TENANT_ID}
+        VITE_REDIRECT_URI: ${VITE_REDIRECT_URI}
+    ports:
+      - '80:80'
+    depends_on:
+      - api
+    networks:
+      - outlooknet
+
+networks:
+  outlooknet:
+    driver: bridge
