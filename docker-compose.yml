@@ -30,4 +30,5 @@ services:
 
 networks:
   outlook.net:
+    name: outlook.net
     driver: bridge
