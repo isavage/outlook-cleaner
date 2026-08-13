@@ -197,6 +197,7 @@ function MainApp() {
   const [folders, setFolders] = useState<{ id: string; displayName: string }[]>([]);
   const [totalMatchCount, setTotalMatchCount] = useState<number | null>(null);
   const [countStatus, setCountStatus] = useState<string | null>(null);
+  const [jobsError, setJobsError] = useState<string | null>(null);
   
 
   const account = accounts[0] ?? null;
@@ -466,9 +467,9 @@ function MainApp() {
       }
       const data = await response.json();
       setJobs(Array.isArray(data) ? data : []);
+      setJobsError(null);
     } catch (jobError) {
-      // eslint-disable-next-line no-console
-      console.error('Job list fetch failed:', jobError);
+      setJobsError(jobError instanceof Error ? jobError.message : 'Unable to load job list.');
     }
   };
 
@@ -917,6 +918,7 @@ function MainApp() {
                 Refresh job status
               </button>
             </div>
+            {jobsError ? <div className="error-message">{jobsError}</div> : null}
             {jobs.length === 0 ? (
               <p>No background delete jobs yet.</p>
             ) : (
