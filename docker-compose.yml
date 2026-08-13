@@ -8,6 +8,7 @@ services:
       - PORT=${PORT:-4000}
     ports:
       - '${PORT:-4000}'
+      #- '4000:4000'
     networks:
       - outlook.net
 
@@ -23,6 +24,7 @@ services:
         VITE_REDIRECT_URI: ${VITE_REDIRECT_URI}
     ports:
       - '80'
+      #- '80:80'
     depends_on:
       - api
     networks:

@@ -54,11 +54,11 @@ const msalConfig = {
 };
 
 const loginRequest = {
-  scopes: ['openid', 'profile', 'User.Read', 'Mail.ReadWrite'],
+  scopes: ['openid', 'profile', 'User.Read', 'Mail.ReadWrite', 'MailboxSettings.ReadWrite'],
 };
 
 const graphScopeRequest = {
-  scopes: ['User.Read', 'Mail.ReadWrite'],
+  scopes: ['User.Read', 'Mail.ReadWrite', 'MailboxSettings.ReadWrite'],
 };
 
 const graphEndpoint = 'https://graph.microsoft.com/v1.0/me/messages';
@@ -79,13 +79,25 @@ function buildGraphFilter(
   const filterParts: string[] = [];
 
   if (sender.trim()) {
-    const safeSender = sender.trim().replace(/'/g, "''");
-    filterParts.push(`contains(from/emailAddress/address,'${safeSender}')`);
+    const senders = sender.split(',').map((s) => s.trim()).filter(Boolean);
+    if (senders.length === 1) {
+      const safeSender = senders[0].replace(/'/g, "''");
+      filterParts.push(`contains(from/emailAddress/address,'${safeSender}')`);
+    } else if (senders.length > 1) {
+      const orParts = senders.map((s) => {
+        const safe = s.replace(/'/g, "''");
+        return `contains(from/emailAddress/address,'${safe}')`;
+      });
+      filterParts.push(`(${orParts.join(' or ')})`);
+    }
   }
 
   if (senderExclude.trim()) {
-    const safeSender = senderExclude.trim().replace(/'/g, "''");
-    filterParts.push(`not(contains(from/emailAddress/address,'${safeSender}'))`);
+    const senders = senderExclude.split(',').map((s) => s.trim()).filter(Boolean);
+    senders.forEach((s) => {
+      const safe = s.replace(/'/g, "''");
+      filterParts.push(`not(contains(from/emailAddress/address,'${safe}'))`);
+    });
   }
 
   if (subject.trim()) {
@@ -154,6 +166,40 @@ function formatBytes(bytes: number) {
 }
 
 
+function summarizeRuleConditions(conditions: any): string {
+  if (!conditions || typeof conditions !== 'object') return '—';
+  const parts: string[] = [];
+  if (conditions.senderContains?.length) parts.push(`From: ${conditions.senderContains.join(', ')}`);
+  if (conditions.fromAddresses?.length) parts.push(`From: ${conditions.fromAddresses.map((a: any) => a.emailAddress?.address || a).join(', ')}`);
+  if (conditions.subjectContains?.length) parts.push(`Subject: ${conditions.subjectContains.join(', ')}`);
+  if (conditions.bodyContains?.length) parts.push(`Body: ${conditions.bodyContains.join(', ')}`);
+  if (conditions.bodyOrSubjectContains?.length) parts.push(`Body/Subject: ${conditions.bodyOrSubjectContains.join(', ')}`);
+  if (conditions.subjectOrBodyContains?.length) parts.push(`Subject/Body: ${conditions.subjectOrBodyContains.join(', ')}`);
+  if (conditions.recipientContains?.length) parts.push(`To: ${conditions.recipientContains.join(', ')}`);
+  if (conditions.sentToAddresses?.length) parts.push(`To: ${conditions.sentToAddresses.map((a: any) => a.emailAddress?.address || a).join(', ')}`);
+  if (conditions.hasAttachments) parts.push('Has attachments');
+  if (conditions.importance) parts.push(`Importance: ${conditions.importance}`);
+  if (conditions.headerContains?.length) parts.push(`Header: ${conditions.headerContains.join(', ')}`);
+  return parts.length > 0 ? parts.join('; ') : '—';
+}
+
+function summarizeRuleActions(actions: any): string {
+  if (!actions || typeof actions !== 'object') return '—';
+  const parts: string[] = [];
+  if (actions.moveToFolder) parts.push('Move to folder');
+  if (actions.copyToFolder) parts.push('Copy to folder');
+  if (actions.delete) parts.push('Delete');
+  if (actions.permanentDelete) parts.push('Permanent delete');
+  if (actions.markAsRead) parts.push('Mark as read');
+  if (actions.markImportance) parts.push(`Mark ${actions.markImportance}`);
+  if (actions.redirectTo?.length) parts.push('Redirect');
+  if (actions.forwardTo?.length) parts.push('Forward');
+  if (actions.forwardAsAttachmentTo?.length) parts.push('Forward as attachment');
+  if (actions.assignCategories?.length) parts.push(`Categorize: ${actions.assignCategories.join(', ')}`);
+  if (actions.stopProcessingRules) parts.push('Stop processing');
+  return parts.length > 0 ? parts.join('; ') : '—';
+}
+
 function stripHtml(value: string) {
   return value
     .replace(/<br\s*\/?>/gi, '\n')
@@ -164,6 +210,26 @@ function stripHtml(value: string) {
     .replace(/&gt;/gi, '>')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function MessageModal({ children, onClose }: { children: any; onClose: () => void }) {
+  useEffect(() => {
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = originalOverflow;
+    };
+  }, []);
+
+  const modal = (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="message-modal" onClick={(e) => e.stopPropagation()}>
+        {children}
+      </div>
+    </div>
+  );
+
+  return createPortal(modal, document.body);
 }
 
 function MainApp() {
@@ -198,7 +264,28 @@ function MainApp() {
   const [totalMatchCount, setTotalMatchCount] = useState<number | null>(null);
   const [countStatus, setCountStatus] = useState<string | null>(null);
   const [jobsError, setJobsError] = useState<string | null>(null);
-  
+  const [isMoving, setIsMoving] = useState(false);
+  const [moveStatus, setMoveStatus] = useState<string | null>(null);
+  const [showMoveModal, setShowMoveModal] = useState(false);
+  const [moveModalTargetIds, setMoveModalTargetIds] = useState<string[]>([]);
+  const [moveModalFolder, setMoveModalFolder] = useState('');
+  const [rules, setRules] = useState<any[]>([]);
+  const [rulesLoading, setRulesLoading] = useState(false);
+  const [rulesError, setRulesError] = useState<string | null>(null);
+  const [showRuleModal, setShowRuleModal] = useState(false);
+  const [editingRule, setEditingRule] = useState<any | null>(null);
+  const [ruleFormName, setRuleFormName] = useState('');
+  const [ruleFormSender, setRuleFormSender] = useState('');
+  const [ruleFormSubject, setRuleFormSubject] = useState('');
+  const [ruleFormTargetFolder, setRuleFormTargetFolder] = useState('');
+  const [ruleFormAction, setRuleFormAction] = useState<'move' | 'copy' | 'delete'>('move');
+  const [ruleFormEnabled, setRuleFormEnabled] = useState(true);
+  const [ruleFormBody, setRuleFormBody] = useState('');
+  const [ruleFormRecipient, setRuleFormRecipient] = useState('');
+  const [ruleFormHasAttachments, setRuleFormHasAttachments] = useState('any');
+  const [ruleFormImportance, setRuleFormImportance] = useState('any');
+  const [ruleFormMarkAsRead, setRuleFormMarkAsRead] = useState(false);
+  const [ruleFormStopProcessing, setRuleFormStopProcessing] = useState(false);
 
   const account = accounts[0] ?? null;
 
@@ -210,8 +297,11 @@ function MainApp() {
       });
       return result.accessToken;
     } catch (silentError) {
-      const result = await instance.acquireTokenPopup(graphScopeRequest);
-      return result.accessToken;
+      await instance.acquireTokenRedirect({
+        ...graphScopeRequest,
+        account: account || undefined,
+      });
+      return '';
     }
   };
 
@@ -306,8 +396,8 @@ function MainApp() {
       }
       const data = await response.json();
       const folders = Array.isArray(data.value) ? data.value : [];
-      const totalItemCount = folders.reduce((sum, folder) => sum + (Number(folder.totalItemCount) || 0), 0);
-      const unreadItemCount = folders.reduce((sum, folder) => sum + (Number(folder.unreadItemCount) || 0), 0);
+      const totalItemCount = folders.reduce((sum: number, folder: any) => sum + (Number(folder.totalItemCount) || 0), 0);
+      const unreadItemCount = folders.reduce((sum: number, folder: any) => sum + (Number(folder.unreadItemCount) || 0), 0);
       setMailboxStats({
         totalItemCount,
         unreadItemCount,
@@ -502,6 +592,300 @@ function MainApp() {
     }
   };
 
+  const moveMessagesByIds = async (ids: string[], destinationFolderId: string) => {
+    const token = await acquireToken();
+    const batchSize = 5;
+    const delayMs = 400;
+
+    for (let index = 0; index < ids.length; index += batchSize) {
+      const batch = ids.slice(index, index + batchSize);
+
+      for (const id of batch) {
+        let attempts = 0;
+        while (attempts < 4) {
+          const response = await fetch(`${graphEndpoint}/${id}/move`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ destinationId: destinationFolderId }),
+          });
+
+          if (response.status === 429 || response.status >= 500) {
+            attempts += 1;
+            const waitMs = 500 * attempts;
+            await new Promise((resolve) => setTimeout(resolve, waitMs));
+            continue;
+          }
+
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(`Graph move failed: ${response.status} ${text}`);
+          }
+          break;
+        }
+      }
+
+      if (index + batchSize < ids.length) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  };
+
+  const openMoveModal = (ids: string[]) => {
+    if (ids.length === 0) {
+      setError('Select at least one message to move.');
+      return;
+    }
+    setMoveModalTargetIds(ids);
+    setMoveModalFolder('');
+    setShowMoveModal(true);
+    setError(null);
+  };
+
+  const confirmMove = async () => {
+    if (!moveModalFolder) {
+      setError('Select a destination folder.');
+      return;
+    }
+    const folderName = folders.find((f) => f.id === moveModalFolder)?.displayName || 'folder';
+    setShowMoveModal(false);
+    setIsMoving(true);
+    setMoveStatus(`Moving ${moveModalTargetIds.length} message(s)...`);
+    setError(null);
+
+    try {
+      await moveMessagesByIds(moveModalTargetIds, moveModalFolder);
+      await fetchMessages();
+      setMoveStatus(`Moved to ${folderName}.`);
+      setSelectedIds([]);
+    } catch (moveError) {
+      setError(moveError instanceof Error ? moveError.message : 'Move request failed.');
+    } finally {
+      setIsMoving(false);
+      setTimeout(() => setMoveStatus(null), 3000);
+    }
+  };
+
+  const fetchMessageRules = async () => {
+    setRulesLoading(true);
+    setRulesError(null);
+    try {
+      const token = await acquireToken();
+      const response = await fetch('https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messageRules', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`Rules fetch failed: ${response.status}`);
+      }
+      const data = await response.json();
+      setRules(Array.isArray(data.value) ? data.value : []);
+    } catch (err) {
+      setRulesError(err instanceof Error ? err.message : 'Failed to load message rules.');
+    } finally {
+      setRulesLoading(false);
+    }
+  };
+
+  const createMessageRule = async () => {
+    if (!ruleFormName.trim()) {
+      setError('Rule name is required.');
+      return;
+    }
+    const token = await acquireToken();
+    const conditions: any = {};
+    if (ruleFormSender.trim()) {
+      conditions.senderContains = ruleFormSender.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    if (ruleFormSubject.trim()) {
+      conditions.subjectContains = ruleFormSubject.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    if (ruleFormBody.trim()) {
+      conditions.bodyContains = ruleFormBody.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    if (ruleFormRecipient.trim()) {
+      conditions.recipientContains = ruleFormRecipient.split(',').map((s) => s.trim()).filter(Boolean);
+    }
+    if (ruleFormHasAttachments === 'yes') {
+      conditions.hasAttachments = true;
+    } else if (ruleFormHasAttachments === 'no') {
+      conditions.hasAttachments = false;
+    }
+    if (ruleFormImportance !== 'any') {
+      conditions.importance = ruleFormImportance;
+    }
+
+    const actions: any = {};
+    if (ruleFormAction === 'move' && ruleFormTargetFolder) {
+      actions.moveToFolder = ruleFormTargetFolder;
+    } else if (ruleFormAction === 'copy' && ruleFormTargetFolder) {
+      actions.copyToFolder = ruleFormTargetFolder;
+    } else if (ruleFormAction === 'delete') {
+      actions.delete = true;
+    }
+    if (ruleFormMarkAsRead) {
+      actions.markAsRead = true;
+    }
+    if (ruleFormStopProcessing) {
+      actions.stopProcessingRules = true;
+    }
+
+    const payload = {
+      displayName: ruleFormName.trim(),
+      sequence: 1,
+      isEnabled: ruleFormEnabled,
+      conditions,
+      actions,
+    };
+
+    try {
+      const response = await fetch('https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messageRules', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Create rule failed: ${response.status} ${text}`);
+      }
+      setShowRuleModal(false);
+      resetRuleForm();
+      await fetchMessageRules();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create rule.');
+    }
+  };
+
+  const updateMessageRule = async (ruleId: string, patch: any) => {
+    const token = await acquireToken();
+    try {
+      const response = await fetch(`https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messageRules/${ruleId}`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(patch),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`Update rule failed: ${response.status} ${text}`);
+      }
+      await fetchMessageRules();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update rule.');
+    }
+  };
+
+  const deleteMessageRule = async (ruleId: string) => {
+    if (!window.confirm('Delete this message rule?')) return;
+    const token = await acquireToken();
+    try {
+      const response = await fetch(`https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messageRules/${ruleId}`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`Delete rule failed: ${response.status}`);
+      }
+      await fetchMessageRules();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete rule.');
+    }
+  };
+
+  const resetRuleForm = () => {
+    setRuleFormName('');
+    setRuleFormSender('');
+    setRuleFormSubject('');
+    setRuleFormTargetFolder('');
+    setRuleFormAction('move');
+    setRuleFormEnabled(true);
+    setRuleFormBody('');
+    setRuleFormRecipient('');
+    setRuleFormHasAttachments('any');
+    setRuleFormImportance('any');
+    setRuleFormMarkAsRead(false);
+    setRuleFormStopProcessing(false);
+    setEditingRule(null);
+  };
+
+  const openCreateRuleModal = () => {
+    resetRuleForm();
+    setShowRuleModal(true);
+  };
+
+  const openEditRuleModal = (rule: any) => {
+    setEditingRule(rule);
+    setRuleFormName(rule.displayName || '');
+    setRuleFormSender((rule.conditions?.senderContains || []).join(', '));
+    setRuleFormSubject((rule.conditions?.subjectContains || []).join(', '));
+    setRuleFormBody((rule.conditions?.bodyContains || []).join(', '));
+    setRuleFormRecipient((rule.conditions?.recipientContains || []).join(', '));
+    setRuleFormHasAttachments(rule.conditions?.hasAttachments ? 'yes' : (rule.conditions?.hasAttachments === false ? 'no' : 'any'));
+    setRuleFormImportance(rule.conditions?.importance || 'any');
+    setRuleFormTargetFolder(rule.actions?.moveToFolder || rule.actions?.copyToFolder || '');
+    setRuleFormAction(rule.actions?.delete ? 'delete' : (rule.actions?.copyToFolder ? 'copy' : 'move'));
+    setRuleFormEnabled(rule.isEnabled ?? true);
+    setRuleFormMarkAsRead(rule.actions?.markAsRead ?? false);
+    setRuleFormStopProcessing(rule.actions?.stopProcessingRules ?? false);
+    setShowRuleModal(true);
+  };
+
+  const saveRuleForm = async () => {
+    if (editingRule) {
+      const patch: any = {
+        displayName: ruleFormName.trim(),
+        isEnabled: ruleFormEnabled,
+      };
+      const conditions: any = {};
+      if (ruleFormSender.trim()) conditions.senderContains = ruleFormSender.split(',').map((s) => s.trim()).filter(Boolean);
+      if (ruleFormSubject.trim()) conditions.subjectContains = ruleFormSubject.split(',').map((s) => s.trim()).filter(Boolean);
+      if (ruleFormBody.trim()) conditions.bodyContains = ruleFormBody.split(',').map((s) => s.trim()).filter(Boolean);
+      if (ruleFormRecipient.trim()) conditions.recipientContains = ruleFormRecipient.split(',').map((s) => s.trim()).filter(Boolean);
+      if (ruleFormHasAttachments === 'yes') {
+        conditions.hasAttachments = true;
+      } else if (ruleFormHasAttachments === 'no') {
+        conditions.hasAttachments = false;
+      }
+      if (ruleFormImportance !== 'any') {
+        conditions.importance = ruleFormImportance;
+      }
+      patch.conditions = conditions;
+
+      const actions: any = {};
+      if (ruleFormAction === 'move' && ruleFormTargetFolder) {
+        actions.moveToFolder = ruleFormTargetFolder;
+      } else if (ruleFormAction === 'copy' && ruleFormTargetFolder) {
+        actions.copyToFolder = ruleFormTargetFolder;
+      } else if (ruleFormAction === 'delete') {
+        actions.delete = true;
+      }
+      if (ruleFormMarkAsRead) {
+        actions.markAsRead = true;
+      }
+      if (ruleFormStopProcessing) {
+        actions.stopProcessingRules = true;
+      }
+      patch.actions = actions;
+
+      await updateMessageRule(editingRule.id, patch);
+      setShowRuleModal(false);
+      resetRuleForm();
+    } else {
+      await createMessageRule();
+    }
+  };
+
   const deleteAllMatching = async () => {
     if (!window.confirm('Create a background delete job for all matching messages?')) {
       return;
@@ -625,10 +1009,12 @@ function MainApp() {
     if (!isAuthenticated) {
       setMailboxStats(null);
       setJobs([]);
+      setRules([]);
       return;
     }
     fetchMailboxUsage();
     loadJobs();
+    fetchMessageRules();
   }, [isAuthenticated]);
 
   useEffect(() => {
@@ -642,31 +1028,11 @@ function MainApp() {
     return () => clearInterval(interval);
   }, [jobs]);
 
-  function MessageModal({ children, onClose }: { children: any; onClose: () => void }) {
-    useEffect(() => {
-      const originalOverflow = document.body.style.overflow;
-      document.body.style.overflow = 'hidden';
-      return () => {
-        document.body.style.overflow = originalOverflow;
-      };
-    }, []);
-
-    const modal = (
-      <div className="modal-backdrop" onClick={onClose}>
-        <div className="message-modal" onClick={(e) => e.stopPropagation()}>
-          {children}
-        </div>
-      </div>
-    );
-
-    return createPortal(modal, document.body);
-  }
-
   return (
     <div className="app-shell">
       <header>
         <div>
-          <h1>Outlook Manager</h1>
+          <h1>Outlook Cleaner</h1>
           <p>Search, preview, and clean up Outlook mail with Microsoft Graph.</p>
         </div>
         <div className="auth-actions">
@@ -710,11 +1076,11 @@ function MainApp() {
             <div className="filter-grid">
               <label>
                 Sender contains
-                <input value={sender} onChange={(event) => setSender(event.target.value)} placeholder="example@domain.com" />
+                <input value={sender} onChange={(event) => setSender(event.target.value)} placeholder="alice@domain.com" />
               </label>
               <label>
                 Sender does not contain
-                <input value={senderExclude} onChange={(event) => setSenderExclude(event.target.value)} placeholder="exclude@domain.com" />
+                <input value={senderExclude} onChange={(event) => setSenderExclude(event.target.value)} placeholder="noreply@domain.com" />
               </label>
               <label>
                 Subject contains
@@ -772,7 +1138,7 @@ function MainApp() {
               </label>
             </div>
             <div className="button-row">
-              <button onClick={fetchMessages} disabled={isLoading}><span aria-hidden="true">🔎</span> Preview matching messages</button>
+              <button onClick={() => fetchMessages()} disabled={isLoading}><span aria-hidden="true">🔎</span> Preview matching messages</button>
               <button onClick={getTotalMessageCount} disabled={isLoading || isDeleting}><span aria-hidden="true">📊</span> Get total message count</button>
             </div>
             {countStatus ? <div className="status-message">{countStatus}</div> : null}
@@ -790,24 +1156,28 @@ function MainApp() {
             <h2>Message preview</h2>
             {error ? <div className="error-message">{error}</div> : null}
             {deleteStatus ? <div className="status-message">{deleteStatus}</div> : null}
-            {isLoading && !deleteStatus ? <div className="status-message">Loading messages...</div> : null}
+            {moveStatus ? <div className="status-message">{moveStatus}</div> : null}
+            {isLoading && !deleteStatus && !moveStatus ? <div className="status-message">Loading messages...</div> : null}
             {messages.length === 0 ? <p>No messages loaded yet. Use preview to fetch results.</p> : (
               <>
                     <div className="button-row preview-tools">
                   <button type="button" onClick={toggleSelectAll}>
                     {allSelected ? 'Clear selection' : 'Select all'}
                   </button>
-                  <button type="button" onClick={() => fetchMessages('previous')} disabled={isDeleting || isLoading || pageHistory.length === 0}>
+                  <button type="button" onClick={() => fetchMessages('previous')} disabled={isDeleting || isLoading || isMoving || pageHistory.length === 0}>
                     Previous 50
                   </button>
-                  <button type="button" onClick={() => fetchMessages('next')} disabled={isDeleting || isLoading || !nextPageLink}>
+                  <button type="button" onClick={() => fetchMessages('next')} disabled={isDeleting || isLoading || isMoving || !nextPageLink}>
                     Next 50
                   </button>
-                  <button type="button" onClick={deleteSelected} disabled={isDeleting || isLoading || selectedIds.length === 0}>
+                  <button type="button" onClick={deleteSelected} disabled={isDeleting || isLoading || isMoving || selectedIds.length === 0}>
                     Delete selected
                   </button>
-                  <button type="button" onClick={deleteAllMatching} disabled={isDeleting || isLoading}>
+                  <button type="button" onClick={deleteAllMatching} disabled={isDeleting || isLoading || isMoving}>
                     🧹 Delete all matching
+                  </button>
+                  <button type="button" onClick={() => openMoveModal(selectedIds)} disabled={isDeleting || isLoading || isMoving || selectedIds.length === 0}>
+                    Move selected
                   </button>
                 </div>
                 <div className="table-wrap">
@@ -864,6 +1234,19 @@ function MainApp() {
 
                               <button
                                 type="button"
+                                className="icon-button"
+                                onClick={() => openMoveModal([message.id])}
+                                disabled={isMoving || isDeleting}
+                                aria-label="Move this message"
+                                title="Move this message"
+                              >
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+                                  <path d="M5 9l4-4m0 0l4 4m-4-4v12M19 15l-4 4m0 0l-4-4m4 4V3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              </button>
+
+                              <button
+                                type="button"
                                 className="icon-button danger"
                                 onClick={async () => {
                                   if (!window.confirm('Delete this message now? This cannot be undone.')) return;
@@ -899,10 +1282,50 @@ function MainApp() {
                   <MessageModal onClose={() => setExpandedBodyId(null)}>
                     <div className="message-modal-header">
                       <h3>Message body</h3>
-                      <button type="button" onClick={() => setExpandedBodyId(null)}>Close</button>
+                      <button type="button" className="modal-close" onClick={() => setExpandedBodyId(null)} aria-label="Close">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                          <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </button>
                     </div>
                     <div className="message-body-text">
                       {stripHtml(messageBodies[expandedBodyId] || 'No message body available.')}
+                    </div>
+                  </MessageModal>
+                ) : null}
+
+                {showMoveModal ? (
+                  <MessageModal onClose={() => setShowMoveModal(false)}>
+                    <div className="message-modal-header">
+                      <h3>Move {moveModalTargetIds.length} message{moveModalTargetIds.length > 1 ? 's' : ''}</h3>
+                      <button type="button" className="modal-close" onClick={() => setShowMoveModal(false)} aria-label="Close">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                          <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </button>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginTop: 16 }}>
+                      <label>
+                        Destination folder
+                        <select
+                          value={moveModalFolder}
+                          onChange={(e) => setMoveModalFolder(e.target.value)}
+                          style={{ width: '100%', marginTop: 6 }}
+                        >
+                          <option value="">Select folder</option>
+                          {folders.map((folder) => (
+                            <option key={folder.id} value={folder.id}>{folder.displayName}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="button-row" style={{ marginTop: 4 }}>
+                        <button type="button" onClick={confirmMove} disabled={!moveModalFolder || isMoving}>
+                          {isMoving ? 'Moving...' : 'Confirm move'}
+                        </button>
+                        <button type="button" onClick={() => setShowMoveModal(false)} disabled={isMoving}>
+                          Cancel
+                        </button>
+                      </div>
                     </div>
                   </MessageModal>
                 ) : null}
@@ -913,7 +1336,7 @@ function MainApp() {
           <section className="box">
             <h2>Background delete jobs</h2>
             <p>These jobs run on the server and can continue if you close the browser.</p>
-            <div className="button-row">
+            <div className="button-row" style={{ marginBottom: 12 }}>
               <button type="button" onClick={loadJobs} disabled={isDeleting || isLoading}>
                 Refresh job status
               </button>
@@ -965,6 +1388,180 @@ function MainApp() {
               </div>
             )}
           </section>
+
+          <section className="box">
+            <h2>Message rules</h2>
+            <p>Outlook inbox rules fetched from your account. These run server-side in Outlook.</p>
+            <div className="button-row" style={{ marginBottom: 12 }}>
+              <button type="button" onClick={fetchMessageRules} disabled={rulesLoading}>
+                Refresh rules
+              </button>
+              <button type="button" onClick={openCreateRuleModal}>
+                Create rule
+              </button>
+            </div>
+            {rulesError ? <div className="error-message">{rulesError}</div> : null}
+            {rulesLoading ? <div className="status-message">Loading rules...</div> : null}
+            {rules.length === 0 && !rulesLoading ? (
+              <p>No message rules found.</p>
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Conditions</th>
+                      <th>Actions</th>
+                      <th>Enabled</th>
+                      <th style={{ width: 100 }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rules.map((rule) => (
+                      <tr key={rule.id}>
+                        <td>{rule.displayName || 'Unnamed'}</td>
+                        <td>{summarizeRuleConditions(rule.conditions)}</td>
+                        <td>{summarizeRuleActions(rule.actions)}</td>
+                        <td>
+                          <label className="toggle-switch" style={{ verticalAlign: 'middle' }}>
+                            <input
+                              type="checkbox"
+                              checked={rule.isEnabled}
+                              onChange={() => updateMessageRule(rule.id, { isEnabled: !rule.isEnabled })}
+                            />
+                            <span className="toggle-slider" />
+                          </label>
+                        </td>
+                        <td>
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            <button
+                              type="button"
+                              className="icon-button"
+                              onClick={() => openEditRuleModal(rule)}
+                              aria-label="Edit rule"
+                              title="Edit rule"
+                            >
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+                                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            </button>
+                            <button
+                              type="button"
+                              className="icon-button danger"
+                              onClick={() => deleteMessageRule(rule.id)}
+                              aria-label="Delete rule"
+                              title="Delete rule"
+                            >
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden>
+                                <path d="M3 6h18M8 6v12a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2V6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                                <path d="M10 11v6M14 11v6M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+
+          {showRuleModal ? (
+            <MessageModal onClose={() => { setShowRuleModal(false); resetRuleForm(); }}>
+              <div className="message-modal-header">
+                <h3>{editingRule ? 'Edit rule' : 'Create rule'}</h3>
+                <button type="button" className="modal-close" onClick={() => { setShowRuleModal(false); resetRuleForm(); }} aria-label="Close">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}>
+                <label>
+                  Rule name
+                  <input value={ruleFormName} onChange={(e) => setRuleFormName(e.target.value)} placeholder="e.g. Newsletter archive" />
+                </label>
+                <label>
+                  Sender contains (comma-separated)
+                  <input value={ruleFormSender} onChange={(e) => setRuleFormSender(e.target.value)} placeholder="newsletter@example.com, alerts@example.com" />
+                </label>
+                <label>
+                  Subject contains (comma-separated)
+                  <input value={ruleFormSubject} onChange={(e) => setRuleFormSubject(e.target.value)} placeholder="invoice, receipt" />
+                </label>
+                <label>
+                  Body contains (comma-separated)
+                  <input value={ruleFormBody} onChange={(e) => setRuleFormBody(e.target.value)} placeholder="receipt, meeting" />
+                </label>
+                <label>
+                  Recipient (To) contains (comma-separated)
+                  <input value={ruleFormRecipient} onChange={(e) => setRuleFormRecipient(e.target.value)} placeholder="team@example.com" />
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <label>
+                    Attachments
+                    <select value={ruleFormHasAttachments} onChange={(e) => setRuleFormHasAttachments(e.target.value)}>
+                      <option value="any">Any</option>
+                      <option value="yes">With attachments</option>
+                      <option value="no">Without attachments</option>
+                    </select>
+                  </label>
+                  <label>
+                    Importance
+                    <select value={ruleFormImportance} onChange={(e) => setRuleFormImportance(e.target.value)}>
+                      <option value="any">Any</option>
+                      <option value="low">Low</option>
+                      <option value="normal">Normal</option>
+                      <option value="high">High</option>
+                    </select>
+                  </label>
+                </div>
+                <label>
+                  Action
+                  <select value={ruleFormAction} onChange={(e) => setRuleFormAction(e.target.value as 'move' | 'copy' | 'delete')}>
+                    <option value="move">Move to folder</option>
+                    <option value="copy">Copy to folder</option>
+                    <option value="delete">Delete</option>
+                  </select>
+                </label>
+                {(ruleFormAction === 'move' || ruleFormAction === 'copy') ? (
+                  <label>
+                    Target folder
+                    <select value={ruleFormTargetFolder} onChange={(e) => setRuleFormTargetFolder(e.target.value)}>
+                      <option value="">Select folder</option>
+                      {folders.map((folder) => (
+                        <option key={folder.id} value={folder.id}>{folder.displayName}</option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 20, flexWrap: 'wrap' }}>
+                  <label className="toggle-switch">
+                    <input type="checkbox" checked={ruleFormMarkAsRead} onChange={(e) => setRuleFormMarkAsRead(e.target.checked)} />
+                    <span className="toggle-slider" />
+                    <span className="toggle-label">Mark as read</span>
+                  </label>
+                  <label className="toggle-switch">
+                    <input type="checkbox" checked={ruleFormStopProcessing} onChange={(e) => setRuleFormStopProcessing(e.target.checked)} />
+                    <span className="toggle-slider" />
+                    <span className="toggle-label">Stop processing rules</span>
+                  </label>
+                  <label className="toggle-switch">
+                    <input type="checkbox" checked={ruleFormEnabled} onChange={(e) => setRuleFormEnabled(e.target.checked)} />
+                    <span className="toggle-slider" />
+                    <span className="toggle-label">{ruleFormEnabled ? 'Enabled' : 'Disabled'}</span>
+                  </label>
+                </div>
+                <div className="button-row" style={{ marginTop: 8 }}>
+                  <button type="button" onClick={saveRuleForm} disabled={!ruleFormName.trim()}>
+                    {editingRule ? 'Save changes' : 'Create rule'}
+                  </button>
+                </div>
+              </div>
+            </MessageModal>
+          ) : null}
         </>
       )}
     </div>
