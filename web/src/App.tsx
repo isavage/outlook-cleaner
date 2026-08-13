@@ -314,7 +314,8 @@ function MainApp() {
       });
       setFolders(folders.map((folder: any) => ({ id: folder.id, displayName: folder.displayName || 'Unnamed' })));
     } catch (mailboxError) {
-      setError(mailboxError instanceof Error ? mailboxError.message : 'Failed to load mailbox usage.');
+      // eslint-disable-next-line no-console
+      console.error('Mailbox usage fetch failed:', mailboxError);
     }
   };
 
@@ -466,7 +467,8 @@ function MainApp() {
       const data = await response.json();
       setJobs(Array.isArray(data) ? data : []);
     } catch (jobError) {
-      setError(jobError instanceof Error ? jobError.message : 'Unable to load job list.');
+      // eslint-disable-next-line no-console
+      console.error('Job list fetch failed:', jobError);
     }
   };
 
