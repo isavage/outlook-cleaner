@@ -1,4 +1,4 @@
-# Outlook Manager
+# Outlook Cleaner
 
 A web app for managing Outlook mail via Microsoft Graph. Search, preview, move, delete, and manage inbox rules — all through a React frontend with a Node.js background job API.
 
